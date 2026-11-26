@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SupplierPay MW | Payment Ledger &amp; Receipts</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <nav>
+        <h2>⚡ SupplierPay MW</h2>
+        <a href="/" class="back-link">← New Supplier Payment</a>
+    </nav>
+
+    <section class="card">
+        <h3>Supplier Payment Ledger</h3>
+        <p>
+            <strong>Completed Transfers:</strong> {{ payouts | length }} |
+            <strong>Total Volume:</strong> {{ "{:,}".format(total_sats) }} sats
+        </p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Date (UTC)</th>
+                    <th>Supplier</th>
+                    <th>Fiat Sent</th>
+                    <th>Sats Paid</th>
+                    <th>Reference</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in payouts %}
+                <tr>
+                    <td>{{ p.timestamp }}</td>
+                    <td>{{ p.supplier }}</td>
+                    <td>{{ p.amount_fiat }} {{ p.currency }}</td>
+                    <td>{{ p.amount_sats }}</td>
+                    <td>
+                        <code title="{{ p.tx_hash or '' }}">
+                            {{ (p.tx_hash or '')[:12] }}{% if p.tx_hash %}...{% endif %}
+                        </code>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="5">No completed supplier payouts yet.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </section>
+</body>
+</html>

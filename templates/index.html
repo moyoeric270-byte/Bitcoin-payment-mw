@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SupplierPay MW | Cross-Border Supplier Payments</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <nav>
+        <h2>⚡ SupplierPay MW</h2>
+        <a href="/ledger">Ledger &amp; Receipts →</a>
+    </nav>
+
+    <section class="card" id="form-section">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h3 style="margin: 0;">Pay International Supplier</h3>
+            <label style="margin: 0; display: flex; align-items: center; gap: 0.4rem; cursor: pointer;">
+                <input type="checkbox" id="demoToggle" style="width: auto; margin: 0;" {% if default_demo %}checked{% endif %}>
+                <span>Demo Mode</span>
+            </label>
+        </div>
+
+        <div class="field">
+            <label for="currency">Supplier Country / Currency</label>
+            <select id="currency">
+                <option value="ZAR">South Africa (ZAR)</option>
+                <option value="KES">Kenya (KES)</option>
+                <option value="NGN">Nigeria (NGN)</option>
+                <option value="GBP" disabled>United Kingdom (GBP) — Coming Soon</option>
+                <option value="CNY" disabled>China / Alipay (CNY) — Coming Soon</option>
+            </select>
+        </div>
+
+        <div class="field">
+            <label for="bankCode">Supplier Bank</label>
+            <select id="bankCode"><option>Loading banks...</option></select>
+        </div>
+
+        <div class="field">
+            <label for="accountNumber">Supplier Account Number</label>
+            <input type="text" id="accountNumber" placeholder="e.g. 6284910234">
+            <button type="button" class="secondary" id="verifyBtn">Verify Bank Account</button>
+        </div>
+
+        <div class="field">
+            <label for="accountName">Verified Account / Business Name</label>
+            <input type="text" id="accountName" placeholder="Verified name appears here">
+        </div>
+
+        <div class="field">
+            <label for="amount">Invoice Amount (Supplier Currency)</label>
+            <input type="number" id="amount" value="500" min="1" step="any">
+        </div>
+
+        <button type="button" id="quoteBtn">Generate Lightning Quote</button>
+    </section>
+
+    <section class="card hidden" id="payment-section">
+        <h3>Pay Lightning Invoice</h3>
+        <p>
+            Paying <strong id="summarySupplier"></strong>:
+            <strong id="summaryFiat"></strong> (<strong id="summarySats"></strong> sats)
+        </p>
+
+        <div class="qr-wrapper">
+            <img id="qrImg" alt="Lightning Invoice QR Code">
+        </div>
+
+        <div class="invoice-box" id="invoiceText"></div>
+        <button type="button" class="secondary" id="copyBtn">Copy Invoice</button>
+        <button type="button" id="simulatePayBtn" class="hidden">⚡ Simulate Lightning Payment (Demo)</button>
+
+        <div class="status-bar">
+            <span>Expires in: <strong id="countdown">15:00</strong></span>
+            <span>Payout Status: <span id="statusBadge" class="badge">PENDING</span></span>
+        </div>
+    </section>
+
+    <script>
+        const els = {
+            demoToggle: document.getElementById("demoToggle"),
+            currency: document.getElementById("currency"),
+            bankCode: document.getElementById("bankCode"),
+            accountNumber: document.getElementById("accountNumber"),
+            accountName: document.getElementById("accountName"),
+            amount: document.getElementById("amount"),
+            verifyBtn: document.getElementById("verifyBtn"),
+            quoteBtn: document.getElementById("quoteBtn"),
+            copyBtn: document.getElementById("copyBtn"),
+            simulatePayBtn: document.getElementById("simulatePayBtn"),
+            paymentSection: document.getElementById("payment-section"),
+            summarySupplier: document.getElementById("summarySupplier"),
+            summaryFiat: document.getElementById("summaryFiat"),
+            summarySats: document.getElementById("summarySats"),
+            qrImg: document.getElementById("qrImg"),
+            invoiceText: document.getElementById("invoiceText"),
+            countdown: document.getElementById("countdown"),
+            statusBadge: document.getElementById("statusBadge"),
+        };
+
+        let pollTimer = null;
+        let expiryTimer = null;
+        let activeTxHash = null;
+
+        async function loadBanks() {
+            els.bankCode.innerHTML = "<option>Loading banks...</option>";
+            try {
+                const res = await fetch(
+                    `/api/banks?currency=${els.currency.value}&demo=${els.demoToggle.checked}`
+                );
+                const payload = await res.json();
+                const banks = Array.isArray(payload.data)
+                    ? payload.data
+                    : Array.isArray(payload)
+                        ? payload
+                        : [];
+
+                els.bankCode.innerHTML = banks.length
+                    ? banks
+                        .map(b => `<option value="${b.code || b.bankCode}">${b.name || b.bankName}</option>`)
+                        .join("")
+                    : '<option value="FNB">First National Bank (FNB)</option>';
+            } catch {
+                els.bankCode.innerHTML = '<option value="FNB">First National Bank (FNB)</option>';
+            }
+        }
+
+        async function verifyAccount() {
+            els.verifyBtn.textContent = "Verifying...";
+            try {
+                const res = await fetch("/api/verify-account", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        demo: els.demoToggle.checked,
+                        currency: els.currency.value,
+                        bankCode: els.bankCode.value,
+                        accountNumber: els.accountNumber.value.trim(),
+                    }),
+                });
+                const payload = await res.json();
+                els.accountName.value =
+                    payload?.data?.accountName || payload?.accountName || "Verified Test Supplier";
+            } finally {
+                els.verifyBtn.textContent = "Verify Bank Account";
+            }
+        }
+
+        async function requestQuote() {
+            const currency = els.currency.value;
+            const amount = els.amount.value;
+            const supplier = els.accountName.value.trim() || "Supplier";
+
+            // Clear any previous countdown before we start a new one.
+            clearInterval(expiryTimer);
+            clearInterval(pollTimer);
+            els.countdown.textContent = "15:00";
+
+            els.quoteBtn.textContent = "Generating Quote...";
+            try {
+                const res = await fetch("/api/quote", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        demo: els.demoToggle.checked,
+                        currency,
+                        amount,
+                        bankCode: els.bankCode.value,
+                        accountNumber: els.accountNumber.value.trim(),
+                        accountName: supplier,
+                    }),
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    alert(`Quote error: ${data.error || JSON.stringify(data)}`);
+                    return;
+                }
+
+                const sats = data.amountInSats || 0;
+                activeTxHash = data.hash;
+                els.summarySupplier.textContent = supplier;
+                els.summaryFiat.textContent = `${amount} ${currency}`;
+                els.summarySats.textContent = sats;
+                els.qrImg.src = `data:image/png;base64,${data.qr_base64}`;
+                els.invoiceText.textContent = data.invoice;
+                els.statusBadge.textContent = "PENDING";
+                els.statusBadge.classList.remove("complete");
+                els.paymentSection.classList.remove("hidden");
+
+                if (data.demo) {
+                    els.simulatePayBtn.classList.remove("hidden");
+                    els.simulatePayBtn.disabled = false;
+                    els.simulatePayBtn.textContent = "⚡ Simulate Lightning Payment (Demo)";
+                } else {
+                    els.simulatePayBtn.classList.add("hidden");
+                }
+
+                startCountdown(900);
+                if (activeTxHash) {
+                    startPolling(activeTxHash, {
+                        supplier,
+                        currency,
+                        amount_fiat: amount,
+                        amount_sats: sats,
+                    });
+                }
+            } finally {
+                els.quoteBtn.textContent = "Generate Lightning Quote";
+            }
+        }
+
+        function startCountdown(durationSeconds) {
+            clearInterval(expiryTimer);
+            let remaining = durationSeconds;
+            expiryTimer = setInterval(() => {
+                remaining--;
+                const mins = Math.floor(remaining / 60);
+                const secs = remaining % 60;
+                els.countdown.textContent = `${mins}:${secs < 10 ? "0" : ""}${secs}`;
+                if (remaining <= 0) {
+                    clearInterval(expiryTimer);
+                    clearInterval(pollTimer);
+                    els.countdown.textContent = "EXPIRED";
+                }
+            }, 1000);
+        }
+
+        function startPolling(txHash, meta) {
+            clearInterval(pollTimer);
+            pollTimer = setInterval(async () => {
+                const query = new URLSearchParams(meta);
+                try {
+                    const res = await fetch(`/api/status/${txHash}?${query}`);
+                    if (!res.ok) {
+                        // Unknown demo hash after a restart, or transient 5xx.
+                        // Keep the timer alive so a real settlement still flips us.
+                        return;
+                    }
+                    const data = await res.json();
+                    const state = (data.state || "pending").toLowerCase();
+
+                    els.statusBadge.textContent = state.toUpperCase();
+                    if (state === "complete") {
+                        els.statusBadge.classList.add("complete");
+                        els.simulatePayBtn.classList.add("hidden");
+                        clearInterval(pollTimer);
+                        clearInterval(expiryTimer);
+                    }
+                } catch {
+                    // Network blip — the next tick will retry.
+                }
+            }, 2000);
+        }
+
+        els.demoToggle.addEventListener("change", loadBanks);
+        els.currency.addEventListener("change", loadBanks);
+        els.verifyBtn.addEventListener("click", verifyAccount);
+        els.quoteBtn.addEventListener("click", requestQuote);
+
+        els.simulatePayBtn.addEventListener("click", async () => {
+            if (!activeTxHash) return;
+            els.simulatePayBtn.disabled = true;
+            els.simulatePayBtn.textContent = "Processing Bank Payout...";
+            try {
+                const res = await fetch(`/api/demo/pay/${activeTxHash}`, { method: "POST" });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            } catch (err) {
+                console.error("Simulate pay failed:", err);
+                els.simulatePayBtn.disabled = false;
+                els.simulatePayBtn.textContent = "⚡ Simulate Lightning Payment (Demo)";
+            }
+        });
+
+        els.copyBtn.addEventListener("click", () => {
+            navigator.clipboard.writeText(els.invoiceText.textContent);
+            els.copyBtn.textContent = "Copied!";
+            setTimeout(() => (els.copyBtn.textContent = "Copy Invoice"), 1500);
+        });
+
+        loadBanks();
+    </script>
+</body>
+</html>

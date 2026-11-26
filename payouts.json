@@ -1,0 +1,10 @@
+[
+  {
+    "tx_hash": "demo_d69ee61385474795",
+    "supplier": "Joburg Wholesale Supplies (FNB-7863)",
+    "currency": "ZAR",
+    "amount_fiat": "500",
+    "amount_sats": "1550000",
+    "timestamp": "2026-11-26 21:19 UTC"
+  }
+]
